@@ -1,0 +1,669 @@
+import pandas as pd
+from pyomo.environ import *
+import math
+from datetime import datetime
+from pyomo.environ import ConcreteModel, Set
+import numpy as np
+from datetime import datetime, timedelta
+from math import ceil
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from collections import defaultdict
+from math import floor
+
+
+
+# Caminho para o ficheiro Excel
+ficheiro_excel = '/Users/jorgecastro/Desktop/Tese/Planeamento Automático.xlsx'
+
+
+# Lê a segunda aba (index 1, já que começa em 0)
+df_excel = pd.read_excel(ficheiro_excel, sheet_name=4, header=None)
+
+# Ignora a primeira linha (assumimos que é cabeçalho)
+df_excel = df_excel.iloc[1:]
+
+# Cria o dicionário com as colunas indicadas
+Ordens_producao = {
+    'Projeto': df_excel.iloc[:, 0].tolist(),        # 1ª coluna → Projeto
+    'PN': df_excel.iloc[:, 1].tolist(),             # 2ª coluna → PN
+    'FAMÍLIA': df_excel.iloc[:, 5].tolist(),        # 6ª coluna → FAMÍLIA
+    'ESP': df_excel.iloc[:, 3].tolist(),            # 3ª coluna → ESP
+    'DESIGNAÇÃO': df_excel.iloc[:, 4].tolist(),     # 5ª coluna → DESIGNAÇÃO
+    'MATRIZ': df_excel.iloc[:, 6].tolist(),         # 7ª coluna → MATRIZ                             #
+    'QUANTIDADE': df_excel.iloc[:, 7].tolist(),
+     'DUE DATE': df_excel.iloc[:, 9].tolist(),      # 10ª coluna → DUE DATE
+}
+
+df_ordens = pd.DataFrame(Ordens_producao)
+df_ordens["TEMPO PROCESSAMENTO (horas)"] = df_ordens["QUANTIDADE"].astype(float) / 60
+import numpy as np  # Adding the import for rounding up
+
+ano_atual = datetime.today().year
+df_ordens['DUE DATE'] = pd.to_datetime(
+    df_ordens['DUE DATE'], 
+    format='%d/%m'
+)
+data_inicio = datetime.today()
+def calcular_horas_uteis_com_extra(due_date):
+    dias_uteis = pd.bdate_range(start=data_inicio, end=due_date).size
+    return dias_uteis * 8 + 15  # 8h por dia útil + 15h extra
+df_ordens['DUE DATE'] = df_ordens['DUE DATE'].apply(calcular_horas_uteis_com_extra)
+
+upper_bound = df_ordens["TEMPO PROCESSAMENTO (horas)"].sum() * 200  # Definindo um upper bound para o modelo
+w = 1
+
+# Somatório das horas de tempo processamento arredondado para cima
+total_tempo_processamento = np.ceil(df_ordens["TEMPO PROCESSAMENTO (horas)"].sum()).astype(int)
+
+#quero que vá à primeira folha do excel que tem o mesmo formato da segunda e crie um dataframe com as mesmas colunas
+df_excel_primeira_folha = pd.read_excel(ficheiro_excel, sheet_name=0, header=None)
+# Ignora a primeira linha (assumimos que é cabeçalho)
+df_excel_primeira_folha = df_excel_primeira_folha.iloc[1:]
+# Cria o dicionário com as colunas indicadas
+Ordens_producao_primeira_folha = {
+    'Projeto': df_excel_primeira_folha.iloc[:, 0].tolist(),        # 1ª coluna → Projeto
+    'PN': df_excel_primeira_folha.iloc[:, 1].tolist(),             # 2ª coluna → PN
+    'FAMÍLIA': df_excel_primeira_folha.iloc[:, 5].tolist(),        # 6ª coluna → FAMÍLIA
+    'ESP': df_excel_primeira_folha.iloc[:, 3].tolist(),            # 3ª coluna → ESP
+    'DESIGNAÇÃO': df_excel_primeira_folha.iloc[:, 4].tolist(),     # 5ª coluna → DESIGNAÇÃO
+    'MATRIZ': df_excel_primeira_folha.iloc[:, 6].tolist(),         # 7ª coluna → MATRIZ                             # Esta fica vazia
+    'QUANTIDADE': df_excel_primeira_folha.iloc[:, 7].tolist(), 
+    'DUE DATE': df_excel_primeira_folha.iloc[:, 8].tolist(),
+}     
+
+# Opcional: converte para DataFrame para inspeção
+df_ordens_primeira_folha = pd.DataFrame(Ordens_producao_primeira_folha)
+df_ordens_primeira_folha["TEMPO PROCESSAMENTO (horas)"] = df_ordens_primeira_folha["QUANTIDADE"].astype(float) / 60
+df_ordens_primeira_folha['DUE DATE'] = pd.to_datetime(
+    df_ordens_primeira_folha['DUE DATE'],
+    format='%d/%m'
+)
+df_ordens_primeira_folha['DUE DATE'] = df_ordens_primeira_folha['DUE DATE'].apply(calcular_horas_uteis_com_extra)
+
+#faz o mesmo para a segunda e terceira folha
+df_excel_segunda_folha = pd.read_excel(ficheiro_excel, sheet_name=1, header=None)
+# Ignora a primeira linha (assumimos que é cabeçalho)
+df_excel_segunda_folha = df_excel_segunda_folha.iloc[1:]
+# Cria o dicionário com as colunas indicadas
+Ordens_producao_segunda_folha = {
+    'Projeto': df_excel_segunda_folha.iloc[:, 0].tolist(),        # 1ª coluna → Projeto
+    'PN': df_excel_segunda_folha.iloc[:, 1].tolist(),             # 2ª coluna → PN
+    'FAMÍLIA': df_excel_segunda_folha.iloc[:, 5].tolist(),        # 6ª coluna → FAMÍLIA
+    'ESP': df_excel_segunda_folha.iloc[:, 3].tolist(),            # 3ª coluna → ESP
+    'DESIGNAÇÃO': df_excel_segunda_folha.iloc[:, 4].tolist(),     # 5ª coluna → DESIGNAÇÃO
+    'MATRIZ': df_excel_segunda_folha.iloc[:, 6].tolist(),         # 7ª coluna → MATRIZ                             # Esta fica vazia
+    'QUANTIDADE': df_excel_segunda_folha.iloc[:, 7].tolist(),
+    'DUE DATE': df_excel_segunda_folha.iloc[:, 8].tolist(),     # 8ª coluna → QUANTIDADE
+}
+# Opcional: converte para DataFrame para inspeção
+df_ordens_segunda_folha = pd.DataFrame(Ordens_producao_segunda_folha)
+df_ordens_segunda_folha["TEMPO PROCESSAMENTO (horas)"] = df_ordens_segunda_folha["QUANTIDADE"].astype(float) / 60
+df_ordens_segunda_folha['DUE DATE'] = pd.to_datetime(
+    df_ordens_segunda_folha['DUE DATE'],
+    format='%d/%m'
+)
+df_ordens_segunda_folha['DUE DATE'] = df_ordens_segunda_folha['DUE DATE'].apply(calcular_horas_uteis_com_extra)
+
+#faz o mesmo para a terceira folha
+df_excel_terceira_folha = pd.read_excel(ficheiro_excel, sheet_name=2, header=None)
+# Ignora a primeira linha (assumimos que é cabeçalho)
+df_excel_terceira_folha = df_excel_terceira_folha.iloc[1:]
+# Cria o dicionário com as colunas indicadas
+Ordens_producao_terceira_folha = {
+    'Projeto': df_excel_terceira_folha.iloc[:, 0].tolist(),        # 1ª coluna → Projeto
+    'PN': df_excel_terceira_folha.iloc[:, 1].tolist(),             # 2ª coluna → PN
+    'FAMÍLIA': df_excel_terceira_folha.iloc[:, 5].tolist(),        # 6ª coluna → FAMÍLIA
+    'ESP': df_excel_terceira_folha.iloc[:, 3].tolist(),            # 3ª coluna → ESP
+    'DESIGNAÇÃO': df_excel_terceira_folha.iloc[:, 4].tolist(),     # 5ª coluna → DESIGNAÇÃO
+    'MATRIZ': df_excel_terceira_folha.iloc[:, 6].tolist(),         # 7ª coluna → MATRIZ                             # Esta fica vazia
+    'QUANTIDADE': df_excel_terceira_folha.iloc[:, 7].tolist(),
+    'DUE DATE': df_excel_terceira_folha.iloc[:, 8].tolist(),      # 10ª coluna → DUE DATE
+}
+# Opcional: converte para DataFrame para inspeção
+df_ordens_terceira_folha = pd.DataFrame(Ordens_producao_terceira_folha)
+df_ordens_terceira_folha["TEMPO PROCESSAMENTO (horas)"] = df_ordens_terceira_folha["QUANTIDADE"].astype(float) / 60
+df_ordens_terceira_folha['DUE DATE'] = pd.to_datetime(
+    df_ordens_terceira_folha['DUE DATE'],
+    format='%d/%m'
+)
+df_ordens_terceira_folha['DUE DATE'] = df_ordens_terceira_folha['DUE DATE'].apply(calcular_horas_uteis_com_extra)
+
+# agora quero juntar os três dataframes num só mas que tenho uma primeira coluna que indica e a posição no dataframe que veio
+df_ordens_primeira_folha['Fonte'] = df_ordens_primeira_folha.index.to_series().apply(lambda x: f'M4 - {x + 1}')  # Modificado para começar em 1
+df_ordens_segunda_folha['Fonte'] = df_ordens_segunda_folha.index.to_series().apply(lambda x: f'M7 - {x + 1}')  # Modificado para começar em 1
+df_ordens_terceira_folha['Fonte'] = df_ordens_terceira_folha.index.to_series().apply(lambda x: f'M9 - {x + 1}')  # Modificado para começar em 1
+df_planeamento_atual= pd.concat([df_ordens_primeira_folha, df_ordens_segunda_folha, df_ordens_terceira_folha], ignore_index=True)
+
+# Reorganiza a coluna 'Fonte' para ser a primeira
+df_planeamento_atual = df_planeamento_atual[['Fonte'] + [col for col in df_planeamento_atual.columns if col != 'Fonte']]
+
+# Mostra as primeiras linhas do DataFrame completo
+#print(df_planeamento_atual)
+
+#quero que analise a ultima folha do excel e crie um dataset "Mj_restrições" com as colunas da primeira linha. Quero que elimines a 3 coluna
+# Lê a última aba (index -1, que é a última)
+df_excel_ultima_folha = pd.read_excel(ficheiro_excel, sheet_name=-1, header=None)
+# Ignora a primeira linha (assumimos que é cabeçalho)
+df_excel_ultima_folha = df_excel_ultima_folha.iloc[1:]
+# Cria o dicionário com as colunas indicadas
+Mj_restricoes = {
+    'DESIGNAÇÃO': df_excel_ultima_folha.iloc[:, 0].tolist(),        # 1ª coluna → Máquina
+    'FAMÍLIA': df_excel_ultima_folha.iloc[:, 1].tolist(),  # 2ª coluna → Tipo de Restrição
+    'M4': df_excel_ultima_folha.iloc[:, 3].tolist(),
+    'M7': df_excel_ultima_folha.iloc[:, 4].tolist(),
+    'M9': df_excel_ultima_folha.iloc[:, 5].tolist(),
+}
+
+# Opcional: converte para DataFrame para inspeção
+df_Mj_restricoes = pd.DataFrame(Mj_restricoes)
+# print(df_Mj_restricoes)
+
+#adicionar os ultimos jobs de cada maquina em df_planeamento_atual a df_ordens
+for maquina in ['M4', 'M7', 'M9']:
+    ultima_ordem = df_planeamento_atual[df_planeamento_atual['Fonte'].str.startswith(maquina)].iloc[-1]
+    ultima_ordem = ultima_ordem.drop('Fonte')  # Remove a coluna 'Fonte'
+    df_ordens = df_ordens.append(ultima_ordem, ignore_index=True)
+
+# Coloca as últimas ordens no topo do DataFrame
+df_ordens = df_ordens.iloc[-len(['M4', 'M7', 'M9']):].append(df_ordens[:-len(['M4', 'M7', 'M9'])], ignore_index=True)
+# print(df_ordens)
+
+
+J = list(range(len(df_ordens)))  # Índices dos jobs
+M = [1, 2,3]        # Máquinas
+
+#criar dataframe que define as designações casais que são designações que para fazer setup entre elas é 0
+df_excel_designacoes_casais = pd.read_excel(ficheiro_excel, sheet_name=7, header=None)
+# Ignora a primeira linha (assumimos que é cabeçalho)
+df_excel_designacoes_casais = df_excel_designacoes_casais.iloc[1:]
+# Cria o dicionário com as colunas indicadas
+designacoes_casais = {
+    'DESIGNAÇÃO 1': df_excel_designacoes_casais.iloc[:, 0].tolist(),        # 1ª coluna → Designação 1
+    'DESIGNAÇÃO 2': df_excel_designacoes_casais.iloc[:, 2].tolist(),        # 3ª coluna → Designação 2
+    'FAMÍLIA': df_excel_designacoes_casais.iloc[:, 1].tolist(),        # 2ª coluna → Família
+}
+# Opcional: converte para DataFrame para inspeção
+df_designacoes_casais = pd.DataFrame(designacoes_casais)
+
+
+#Quero criar uma forma de definir skj (tempo de set up para fazer job j imediatamente antes depois do k). é preciso olhar para a família de k e j, se for diferente, então set up time = 2 horas, se não então olhar para DESIGNAÇÃO, se for diferente, então set up time = 1 hora, se não, olhar para MATRIZ, se for diferente, então set up time = 0,8 horas, se não, então set up time = 0 horas
+s = pd.DataFrame({
+    'j': [],
+    'k': [],
+    'setup_time': []
+})
+# Exemplo de como preencher a tabela de setup times
+setup_times = []
+
+for j in J:
+    for i in J:
+        casal = 0  # ← reinicia a variável casal para cada par (j, i)
+        setup_time = 0  # ← reinicia o tempo de setup para cada par (j, i)
+        design_j = df_ordens['DESIGNAÇÃO'][j]
+        design_i = df_ordens['DESIGNAÇÃO'][i]   
+
+        # verificar se as designações i e j são casais
+        for _, row in df_designacoes_casais.iterrows():
+            if ((row['DESIGNAÇÃO 1'] == design_j and row['DESIGNAÇÃO 2'] == design_i) or
+                (row['DESIGNAÇÃO 1'] == design_i and row['DESIGNAÇÃO 2'] == design_j)):
+                casal = 1
+                #print(f"Casal encontrado: {design_i} e {design_j} na linha {row.name}")
+                break  # já encontraste, podes sair do loop
+
+        if j == i:
+            continue
+        if df_ordens['FAMÍLIA'][j] != df_ordens['FAMÍLIA'][i]:
+            setup_time = setup_time + 3
+        if df_ordens['DESIGNAÇÃO'][j] != df_ordens['DESIGNAÇÃO'][i] and casal != 1:
+            setup_time = setup_time + 1.5
+        
+        if df_ordens['MATRIZ'][j] != df_ordens['MATRIZ'][i]:
+            setup_time = setup_time + 0.5
+        if casal == 1:
+            setup_time = setup_time + 0.3
+        setup_times.append((j, i, setup_time))
+
+s = pd.DataFrame(setup_times, columns=['j', 'k', 'setup_time'])
+
+#Quero que imprima o s todo sem as reticências
+# print(s.head)
+
+
+# Cria um dicionário de elegibilidade para as máquinas
+eligibilidade = {}  # dicionário: chave = índice da ordem, valor = lista de máquinas elegíveis
+
+for idx, row in df_ordens.iterrows():
+    designacao = row.iloc[4]  # coluna 5 (DESIGNAÇÃO)
+    familia = row.iloc[2]     # coluna 4 (FAMÍLIA)
+
+    # Procura a linha correspondente no df_Mj_restricoes
+    filtro = (df_Mj_restricoes['DESIGNAÇÃO'] == designacao) & (df_Mj_restricoes['FAMÍLIA'] == familia)
+    linha_restricao = df_Mj_restricoes[filtro]
+
+    if not linha_restricao.empty:
+        linha = linha_restricao.iloc[0]  # pega a primeira ocorrência
+        maquinas_possiveis = []
+        if linha['M4'] == 'SIM':
+            maquinas_possiveis.append('M4')
+        if linha['M7'] == 'SIM':
+            maquinas_possiveis.append('M7')
+        if linha['M9'] == 'SIM':
+            maquinas_possiveis.append('M9')
+    else:
+        maquinas_possiveis = []  # Nenhuma elegível (não foi encontrada a linha)
+    # print(f"Máquinas possíveis para {designacao} (Família: {familia}): {maquinas_possiveis}")
+    eligibilidade[idx] = maquinas_possiveis
+
+
+from pyomo.environ import (
+    ConcreteModel, Set, Param, Var, NonNegativeReals, Binary,
+    ConstraintList, Objective, minimize, SolverFactory
+)
+
+# ---------- 1. Model shell & sets ----------
+model = ConcreteModel()
+model.J = Set(initialize=list(range(len(df_ordens))), ordered=True)      # all jobs
+model.M = Set(initialize=['M4', 'M7', 'M9'], ordered=True)              # machines (names)
+model.T = Set(initialize=range(ceil(df_ordens['TEMPO PROCESSAMENTO (horas)'].sum())), ordered=True)
+
+dummy_jobs = list(range(len(model.M)))
+real_jobs  = list(range(len(model.M), len(df_ordens)))
+
+model.J0 = Set(initialize=dummy_jobs)   # dummy
+model.Jr = Set(initialize=real_jobs)    # real ⟹ to schedule
+
+BIG_M = upper_bound                     # you computed this earlier
+
+# ---------- 2. Parameters ----------
+def _safe(col, default=0.0):
+    return (df_ordens[col] if col in df_ordens.columns else pd.Series(default, index=df_ordens.index))
+
+model.Pj = Param(model.J, initialize=lambda m,j: float(df_ordens.loc[j,'TEMPO PROCESSAMENTO (horas)']))
+model.Dj = Param(model.J, initialize=lambda m,j: float(df_ordens.loc[j, 'DUE DATE']))  
+model.Rj = Param(model.J, initialize=lambda m,j: float(_safe('RELEASE_TIME')[j]))
+model.Wj = Param(model.J, initialize=lambda m,j: float(_safe('WEIGHT', 1.0)[j]))
+b = 2 # Equipas disponíveis
+
+
+
+# setup-time lookup (note: your DataFrame stores (j,i) not (i,j) ― we flip!)
+
+def _setup(m,i,j):
+    row = s[(s['j'] == j) & (s['k'] == i)]
+    return float(row.iloc[0]['setup_time']) if not row.empty else 0.0
+model.Sij = Param(model.J, model.J, initialize=_setup)
+
+# eligibility 0/1
+model.Ejk = Param(
+    model.J, model.M,
+    within=Binary,
+    initialize=lambda m,j,k: 1 if k in eligibilidade.get(j, []) else 0
+)
+
+
+
+# ---------- 3. Decision & aux variables ----------
+model.Xijk = Var(model.J, model.J, model.M, domain=Binary)  # Precedência
+model.Y = Var(model.J, model.M, domain=Binary)               # Alocação do job j à máquina k
+model.Cj = Var(model.J, domain=NonNegativeReals)             # Tempo de conclusão
+model.t_jk = Var(model.J, model.M, domain=NonNegativeReals)  # Início do job j na máquina k
+model.Makespan = Var(domain=NonNegativeReals)
+model.Lj = Var(model.J, domain=Integers)  # Lateness
+model.Tj = Var(model.J, domain=NonNegativeReals)  # Tempo de espera
+
+
+# ---------- 4. Constraints ----------
+# 1. Variável Zkt
+
+model.start_and_completion = ConstraintList()
+for j in model.Jr:
+    for k in model.M:
+        model.start_and_completion.add(
+            model.Cj[j] >= model.t_jk[j, k] + model.Pj[j] - (1 - model.Y[j, k]) * BIG_M
+        )
+
+model.sequencing_start = ConstraintList()
+for i in model.J:
+    for j in model.Jr:
+        if i != j:
+            for k in model.M:
+                model.sequencing_start.add(
+                    model.t_jk[j, k] >= model.Cj[i] + model.Sij[i, j] - (1 - model.Xijk[i, j, k]) * BIG_M
+                )
+
+
+
+model.X_Y_coherence = ConstraintList()
+for i in model.J:
+    for j in model.Jr:
+        if i != j:
+            for k in model.M:
+                model.X_Y_coherence.add(model.Xijk[i, j, k] <= model.Y[i, k])
+                model.X_Y_coherence.add(model.Xijk[i, j, k] <= model.Y[j, k])
+
+############ dummys #####################
+model.dummy_machine_fix = ConstraintList()
+dummy_machine_map = {0: "M4", 1: "M7", 2: "M9"}
+# Fixar as máquinas dos jobs dummy
+for j in model.J0:
+    if j in dummy_machine_map:
+        model.dummy_machine_fix.add(model.Y[j, dummy_machine_map[j]] == 1)
+    else:
+        raise ValueError(f"Job dummy {j} não mapeado para uma máquina válida.")
+
+for j in model.J0:
+    for k in model.M:
+        model.dummy_machine_fix.add(model.t_jk[j, k] == 0)
+
+for j in model.J0:
+    for k in model.M:
+        model.dummy_machine_fix.add(
+            model.Y[j, k] == (1 if dummy_machine_map[j] == k else 0)
+        )
+
+##########################################
+
+
+model.onePred = ConstraintList()
+for j in model.Jr:
+    model.onePred.add(
+        sum(model.Xijk[i, j, k] for i in model.J for k in model.M if i != j) == 1
+    )
+
+model.oneSucc = ConstraintList()
+for i in model.J:
+    model.oneSucc.add(
+        sum(model.Xijk[i, j, k] for j in model.Jr for k in model.M  if i != j) <= 1
+    )
+
+
+model.dummyFinish = ConstraintList()
+for j in model.J0:
+    model.dummyFinish.add(model.Cj[j] == model.Pj[j])
+
+model.lateDef = ConstraintList()
+for j in model.Jr:
+    model.lateDef.add(model.Lj[j] == model.Cj[j] - model.Dj[j])
+
+
+model.Yjk_link = ConstraintList()
+for j in model.Jr:
+    for k in model.M:
+        for i in model.Jr:
+            if i != j:
+                
+                    model.Yjk_link.add(model.Y[j, k] >= model.Xijk[i, j, k])
+        model.Yjk_link.add(
+            model.Y[j, k] <= sum(model.Xijk[i, j, k] for i in model.J if i != j )
+        )
+
+model.unique_machine = ConstraintList()
+for j in model.Jr:
+    model.unique_machine.add(sum(model.Y[j, k] for k in model.M) == 1)
+
+
+# Variável auxiliar
+model.Makespan = Var(domain=NonNegativeReals)
+
+# Restrições para garantir que Makespan ≥ max(Cj) por máquina
+model.makespan_constr = ConstraintList()
+for j in model.Jr:
+    for k in model.M:
+        model.makespan_constr.add(
+            model.Makespan >= model.Cj[j] - (1 - model.Y[j, k]) * BIG_M
+        )
+
+
+model.mj = ConstraintList()
+for i in model.J:
+    for j in model.Jr:
+        if i != j:
+            for k in model.M:
+                    model.mj.add(model.Xijk[i, j, k] <= model.Ejk[j, k])
+
+
+
+# ---------- Escolha do Objetivo ----------
+print("\n=== SELEÇÃO DO OBJETIVO ===")
+print("1 - Minimizar Cj (soma dos tempos de conclusão)")
+print("2 - Minimizar Makespan (distribuir carga pelas máquinas)")
+print("3 - Minimizar Setup Times")
+print("4 - Minimizar Setup Times e Minimizar Cj (soma dos tempos de conclusão)")
+print("5 - Minimizar atraso (Lateness)")
+
+opcao_objetivo = input("Escolhe o número do objetivo (1, 2 ou 3): ")
+
+if opcao_objetivo == "1":
+    print("→ Objetivo: Minimizar soma dos Cj")
+    model.obj = Objective(
+        expr=sum(model.Cj[j] for j in model.Jr),
+        sense=minimize
+    )
+elif opcao_objetivo == "1":
+    print("→ Objetivo: Minimizar soma dos Cj e maximizar Zkt")
+    model.obj = Objective(
+        expr=sum(model.Cj[j] for j in model.Jr) - sum(model.Zkt[k] for k in model.M),
+        sense=minimize
+    )
+elif opcao_objetivo == "2":
+    print("→ Objetivo: Minimizar Makespan")
+    model.obj = Objective(
+        expr=model.Makespan,
+        sense=minimize
+    )
+
+elif opcao_objetivo == "3":
+    print("→ Objetivo: Minimizar tempo de Setup total")
+    model.obj = Objective(
+        expr=sum(model.Sij[i, j] * model.Xijk[i, j, k]
+                 for i in model.J for j in model.J for k in model.M if i != j),
+        sense=minimize
+    )
+
+elif opcao_objetivo == "4":
+    print("→ Objetivo: Minimizar tempo de Setup e minimizar soma dos Cj")
+    model.obj = Objective(
+        expr=sum(model.Cj[j] for j in model.Jr) + sum(model.Sij[i, j] * model.Xijk[i, j, k]
+                 for i in model.J for j in model.J for k in model.M if i != j),
+        sense=minimize
+    )
+
+elif opcao_objetivo == "5":
+    print("→ Objetivo: Minimizar atraso (Lateness)")
+    model.obj = Objective(
+        expr=sum(model.Lj[j] for j in model.Jr),
+        sense=minimize
+    )
+
+
+
+# ---------- 6. Solve ----------
+solver = SolverFactory('gurobi')  # swap if you use CBC, GLPK, ...
+solver.options["Threads"]   = 7
+solver.options["MIPGap"]    = 0.01
+solver.options["TimeLimit"] = 30 # 
+results = solver.solve(model, tee=True)
+# Extrair dados do modelo resolvido
+job_start = {}
+job_dur = {}
+job_maquina = {}
+
+for j in model.J:
+    for k in model.M:
+        if value(model.Y[j, k]) >= 0.5:
+            start = value(model.t_jk[j, k])
+            dur = value(model.Pj[j])
+            job_start[j] = start
+            job_dur[j] = dur
+            job_maquina[j] = k
+
+# Construir sequência por máquina
+sequencias = {}
+for j in sorted(job_start, key=lambda x: job_start[x]):
+    k = job_maquina[j]
+    if k not in sequencias:
+        sequencias[k] = []
+    sequencias[k].append(j)
+
+# Imprimir sequência
+print("\n=== SEQUÊNCIA DE JOBS POR MÁQUINA ===")
+for k in sorted(sequencias):
+    seq = sequencias[k]
+    print(f"Máquina {k}: {' → '.join(str(j) for j in seq)}")
+
+#máquinas ativas em cada turno (turno 8 em 8 horas)
+
+duracao_turno = 8
+turno_maquinas = {}  # t → set de máquinas
+
+for j in model.Jr:
+    for k in model.M:
+        if value(model.Y[j, k]) >= 0.5:
+            start = value(model.t_jk[j, k])
+            dur = value(model.Pj[j])
+            turno_ini = floor(start / duracao_turno)
+            turno_fim = floor((start + dur - 1e-4) / duracao_turno)
+
+            for t in range(turno_ini, turno_fim + 1):
+                if t not in turno_maquinas:
+                    turno_maquinas[t] = set()
+                turno_maquinas[t].add(k)
+
+# Imprimir resultado
+print("\n=== MÁQUINAS ATIVAS POR TURNO (8h cada, começando em 0) ===")
+for t in sorted(turno_maquinas):
+    maquinas = sorted(turno_maquinas[t])
+    print(f"Turno {t} (das {t*8}h às {(t+1)*8}h): {len(maquinas)} máquina(s) ativa(s) → {maquinas}")
+
+
+
+# GANTT
+fig, ax = plt.subplots(figsize=(12, 5))
+yticks = []
+yticklabels = []
+colors = plt.cm.tab20.colors
+
+for i, k in enumerate(sorted(sequencias)):
+    yticks.append(i)
+    yticklabels.append(f"{k}")
+    for j in sequencias[k]:
+        start = job_start[j]
+        dur = job_dur[j]
+        ax.barh(i, dur, left=start, color=colors[j % len(colors)], edgecolor='black')
+        ax.text(start + dur / 2, i, f"Job {j}", va='center', ha='center', fontsize=8, color='white')
+
+# Estética
+ax.set_yticks(yticks)
+ax.set_yticklabels(yticklabels)
+ax.set_xlabel("Tempo (horas)")
+ax.set_title("Gráfico de Gantt - Sequência de Jobs por Máquina")
+ax.grid(True, axis='x', linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+
+# Plotar as máquinas ativas por turno
+fig, ax = plt.subplots(figsize=(12, 5))
+for t in sorted(turno_maquinas):
+    maquinas = sorted(turno_maquinas[t])
+    y = t * 2  # Espaçamento vertical entre turnos
+    for k in maquinas:
+        ax.add_patch(mpatches.Rectangle((t * duracao_turno, y), duracao_turno, 1, label=f"Máquina {k}"))
+        ax.text(t * duracao_turno + duracao_turno / 2, y + 0.5, f"{k}", va='center', ha='center', fontsize=8, color='black')
+# Estética
+ax.set_xlabel("Tempo (horas)")
+ax.set_ylabel("Turnos")
+ax.set_title("Máquinas Ativas por Turno (8h cada)")
+ax.set_yticks([t * 2 + 0.5 for t in range(len(turno_maquinas))])
+ax.set_yticklabels([f"Turno {t}" for t in range(len(turno_maquinas))])
+ax.grid(True, axis='x', linestyle='--', alpha=0.5)
+plt.tight_layout()
+plt.show()
+
+# 1. Extrair dados do modelo resolvido
+job_start = {}
+job_dur = {}
+job_maquina = {}
+
+for j in model.J:
+    for k in model.M:
+        if model.Y[j, k]() >= 0.5:
+            job_start[j] = model.t_jk[j, k]()
+            job_dur[j] = model.Pj[j]
+            job_maquina[j] = k
+
+# 2. Heurística para limitar a 2 máquinas ativas simultaneamente
+agenda = []
+ocupacao = defaultdict(list)
+
+jobs = sorted(job_start.items(), key=lambda x: x[1])  # ordenar por tempo de início
+for j, start in jobs:
+    dur = job_dur[j]
+    maq = job_maquina[j]
+    novo_start = start
+
+    while True:
+        novo_end = novo_start + dur
+        conflitos = 0
+        for t in range(floor(novo_start), floor(novo_end)):
+            ativos_maq = set(ocupacao[t])
+            if maq not in ativos_maq and len(ativos_maq) >= 2:
+                conflitos += 1
+        if conflitos == 0:
+            for t in range(floor(novo_start), floor(novo_end)):
+                ocupacao[t].append(maq)
+            agenda.append((novo_start, dur, maq, j))
+            break
+        else:
+            novo_start += 1
+
+# 3. Gerar estrutura
+resultados_heuristica = {
+    j: {"start": start, "duration": dur, "machine": maq}
+    for start, dur, maq, j in agenda
+}
+
+# 4. Gráfico de Gantt
+gantt_data = defaultdict(list)
+for job, dados in resultados_heuristica.items():
+    start = dados["start"]
+    dur = dados["duration"]
+    maq = dados["machine"]
+    gantt_data[maq].append((start, dur, job))
+
+for k in gantt_data:
+    gantt_data[k].sort()
+
+# Gerar o gráfico de Gantt com nomes corretos e barras bem definidas
+fig, ax = plt.subplots(figsize=(14, 7))
+yticks = []
+yticklabels = []
+colors = plt.cm.tab20.colors
+
+# Garantir ordenação correta
+for i, k in enumerate(sorted(gantt_data.keys())):
+    yticks.append(i)
+    yticklabels.append(f"Máquina {k}")
+    for (start, duration, job) in gantt_data[k]:
+        # Apenas desenhar se tiver duração significativa
+        if duration > 0:
+            color = colors[job % len(colors)]
+            rect = ax.barh(i, duration, left=start, color=color, edgecolor='black')
+            
+            # Texto centralizado claramente dentro das barras
+            ax.text(start + duration / 2, i, f"Job {job}",
+                    va='center', ha='center', fontsize=9, color='white', fontweight='bold')
+
+# Melhorias visuais
+ax.set_yticks(yticks)
+ax.set_yticklabels(yticklabels, fontsize=10)
+ax.set_xlabel("Tempo (horas)", fontsize=11)
+ax.set_title("Gráfico de Gantt - Heurística com Máx. 2 Máquinas Ativas", fontsize=13)
+ax.grid(True, axis='x', linestyle='--', alpha=0.5)
+
+# Garantir que não há elementos fantasmas
+fig.patch.set_facecolor('white')
+ax.set_facecolor('white')
+
+plt.tight_layout()
+plt.show()
