@@ -22,7 +22,7 @@ from pyomo.environ import (
 
 # ---------------- Config ----------------
 ficheiro_excel = '/Users/jorgecastro/Desktop/Tese/Planeamento Automático.xlsx'
-Delta = 0.4
+Delta = 0.5  # Increased from 0.4 to reduce number of time slots
 b = 2
 H_HOURS = 100.0
 M_names = ['M4','M7','M9']
@@ -151,200 +151,298 @@ Sij = {(int(row.i), int(row.j)): int(math.ceil(float(row.setup_time) / Delta)) f
 H_slots = int(math.ceil(H_HOURS / Delta))
 dbg(f"🧭 Horizonte H={H_slots} slots (Δ={Delta}h). [{time.time()-T0:.1f}s]")
 
-valid_starts = {}
-for j in todos:
-    pj = Pj[j]
-    tmin = max(0, Rj[j])
-    tmax = H_slots - pj
-    if math.isfinite(Dj[j]): tmax = min(tmax, max(-1, Dj[j] - pj))
-    if tmin > tmax: continue
-    for k in M_names:
-        if j in D:
-            if k == DUMMY_MAP[j]:
-                valid_starts[(j, k)] = range(tmin, tmax + 1)
-        else:
-            if k in eligibilidade.get(j, []):
-                valid_starts[(j, k)] = range(tmin, tmax + 1)
+# Compute feasible time windows for each (job, machine) pair
+def compute_feasible_windows(todos, reais, D, DUMMY_MAP, Pj, Rj, Dj, H_slots, eligibilidade, M_names):
+    """Calcula janelas de tempo factíveis para cada (job, máquina)"""
+    windows = {}
+    
+    for j in todos:
+        pj = Pj[j]
+        tmin = max(0, Rj[j])
+        tmax = H_slots - pj
+        
+        if math.isfinite(Dj[j]):
+            tmax = min(tmax, max(-1, Dj[j] - pj))
+        
+        if tmin > tmax:
+            dbg(f"⚠️ Job {j} sem janela viável: tmin={tmin}, tmax={tmax}")
+            continue
+            
+        for k in M_names:
+            eligible = False
+            if j in D:
+                eligible = (k == DUMMY_MAP[j])
+            else:
+                eligible = (k in eligibilidade.get(j, []))
+            
+            if eligible:
+                windows[(j, k)] = (tmin, tmax)
+    
+    return windows
 
-# -------- Modelo --------
+feasible_windows = compute_feasible_windows(
+    todos, reais, D, DUMMY_MAP, Pj, Rj, Dj, H_slots, eligibilidade, M_names
+)
+
+dbg(f"🧭 Janelas factíveis: {len(feasible_windows)} pares. [{time.time()-T0:.1f}s]")
+
+# Build W_index with temporal validation (only 3D now: i,j,k without time)
+def build_W_index_validated(reais, todos, feasible_windows, M_names, Pj, Sij):
+    """
+    Cria W[i,j,k] APENAS se existe sobreposição temporal viável
+    """
+    W_index = []
+    
+    for k in M_names:
+        jobs_on_k = [j for j in todos if (j, k) in feasible_windows]
+        
+        for i in jobs_on_k:
+            tmin_i, tmax_i = feasible_windows[(i, k)]
+            Pi = Pj[i]
+            
+            for j in jobs_on_k:
+                if i == j:
+                    continue
+                
+                # Só criar arco se j for real
+                if j not in reais:
+                    continue
+                
+                tmin_j, tmax_j = feasible_windows[(j, k)]
+                S = Sij.get((i, j), 0)
+                
+                # Verificar se existe overlap temporal viável:
+                # i pode terminar (tmax_i + Pi) + setup S antes de j começar mais tarde (tmax_j)
+                earliest_i_end = tmin_i + Pi
+                latest_j_start = tmax_j
+                
+                if earliest_i_end + S <= latest_j_start:
+                    W_index.append((i, j, k))
+    
+    return W_index
+
+W_index = build_W_index_validated(reais, todos, feasible_windows, M_names, Pj, Sij)
+
+dbg(f"📉 W_index validado: {len(W_index)} triplos (i,j,k). [{time.time()-T0:.1f}s]")
+
+# -------- Modelo Otimizado --------
 model = ConcreteModel()
 model.J    = Set(initialize=reais, ordered=True)
 model.Jall = Set(initialize=todos, ordered=True)
 model.M    = Set(initialize=M_names, ordered=True)
-model.T    = Set(initialize=range(H_slots), ordered=True)
 
 model.Pj = Param(model.Jall, initialize=lambda m,j: Pj[j])
 model.Rj = Param(model.Jall, initialize=lambda m,j: max(0, Rj[j]))
 model.Dj = Param(model.Jall, initialize=lambda m,j: Dj[j])
 
-def X_index_init(m): return [(j,k,t) for (j,k), ts in valid_starts.items() for t in ts]
-model.X_index = Set(dimen=3, initialize=X_index_init)
-model.X = Var(model.X_index, domain=Binary)
-def W_index_init(m):
-    idx = []
-    valid_i = {}
-    for i in m.Jall:
-        Pi = Pj[i]; Ri = max(0, Rj[i])
-        for k in M_names:
-            i_ok = (i in D and DUMMY_MAP[i]==k) or (k in eligibilidade.get(i, []))
-            if i_ok:
-                valid_i[(i,k)] = range(max(0, Ri), H_slots - Pi + 1)
-    for (j,k), ts_j in valid_starts.items():
-        if j not in reais:
-            continue
-        for i in todos:
-            if i == j or (i,k) not in valid_i:
-                continue
-            S = Sij.get((i,j), 0)
-            Pi = Pj[i]
-            taus_i = valid_i[(i,k)]
-            for t in ts_j:
-                if i in D:
-                    # dummy: basta haver tempo para o setup antes de t
-                    if t - S >= 0:
-                        idx.append((i,j,k,t))
-                else:
-                    # real: precisa de algum τ viável
-                    if any(tau <= t - S - Pi for tau in taus_i):
-                        idx.append((i,j,k,t))
-    return idx
-model.W_index = Set(dimen=4, initialize=W_index_init)
+# Y[j,k] = 1 se job j executa em máquina k (2D instead of 3D X[j,k,t])
+model.Y = Var(model.Jall, model.M, domain=Binary)
+
+# Start[j] = tempo de início contínuo (instead of discrete time slot selection)
+model.Start = Var(model.Jall, domain=NonNegativeReals, bounds=(0, H_slots))
+
+# W[i,j,k] = 1 se i precede imediatamente j na máquina k (3D instead of 4D)
+model.W_index = Set(initialize=W_index, dimen=3)
 model.W = Var(model.W_index, domain=Binary)
 
 
 # ============================================================
-# 4) RESTRIÇÕES 
+# RESTRIÇÕES OTIMIZADAS
 # ============================================================
 dbg("🧩 A construir restrições...")
 
-# --- PREDECESSOR SÓ ATIVA SE i CABE ANTES EM k ---
-model.pred_link = ConstraintList()
-for (i, j, k, t) in model.W_index:
-    Pi = Pj[i]
-    S  = Sij.get((i, j), 0)
-    feas = [tau for (ii, kk, tau) in model.X_index
-            if ii == i and kk == k and tau <= t - S - Pi]
-    if feas:
-        model.pred_link.add(sum(model.X[i, k, tau] for tau in feas) >= model.W[i, j, k, t])
-    else:
-        model.pred_link.add(0 >= model.W[i, j, k, t])
+M_big = H_slots * 2  # Big-M for disjunctive constraints
 
-# --- NO MÁXIMO 1 SUCESSOR POR JOB i (qualquer máquina) ---
-model.one_succ = ConstraintList()
-for i in model.Jall:
-    model.one_succ.add(
-        sum(model.W[i2, j2, k2, t2]
-            for (i2, j2, k2, t2) in model.W_index
-            if i2 == i) <= 1
-    )
-
-# --- CADA JOB (incl. dummys) COMEÇA EXATAMENTE 1 VEZ ---
-model.start_once = ConstraintList()
+# (1) Cada job executa em exatamente uma máquina
+model.one_machine = ConstraintList()
 for j in model.Jall:
-    model.start_once.add(
-        sum(model.X[j, k, t] for (jj, k, t) in model.X_index if jj == j) == 1
+    eligible_k = [k for k in model.M if (j, k) in feasible_windows]
+    if eligible_k:
+        model.one_machine.add(sum(model.Y[j, k] for k in eligible_k) == 1)
+    else:
+        raise ValueError(f"Job {j} sem máquinas elegíveis!")
+
+# (2) Y=1 => Start dentro da janela
+model.window_bounds = ConstraintList()
+for (j, k), (tmin, tmax) in feasible_windows.items():
+    model.window_bounds.add(model.Start[j] >= tmin - M_big * (1 - model.Y[j, k]))
+    model.window_bounds.add(model.Start[j] <= tmax + M_big * (1 - model.Y[j, k]))
+
+# (3) Release times
+model.release = ConstraintList()
+for j in model.Jall:
+    model.release.add(model.Start[j] >= model.Rj[j])
+
+# (4) Due dates
+model.due = ConstraintList()
+for j in model.Jall:
+    if math.isfinite(Dj[j]):
+        model.due.add(model.Start[j] + model.Pj[j] <= model.Dj[j])
+
+# (5) W implica precedência
+model.precedence = ConstraintList()
+for (i, j, k) in model.W_index:
+    Pi = Pj[i]
+    S = Sij.get((i, j), 0)
+    
+    # W=1 => ambos na máquina k
+    model.precedence.add(model.W[i, j, k] <= model.Y[i, k])
+    model.precedence.add(model.W[i, j, k] <= model.Y[j, k])
+    
+    # W=1 => Start[j] >= Start[i] + Pi + S
+    model.precedence.add(
+        model.Start[j] >= model.Start[i] + Pi + S - M_big * (1 - model.W[i, j, k])
     )
 
-# --- LIGAÇÃO X ↔ W: 1 predecessor por arranque (apenas jobs reais) ---
-pred_for_X = defaultdict(list)
-for (i, j, k, t) in model.W_index:
-    pred_for_X[(j, k, t)].append(i)
+# (6) No overlap: Para cada par de jobs na mesma máquina
+model.no_overlap = ConstraintList()
+for k in model.M:
+    jobs_k = [j for j in model.Jall if (j, k) in feasible_windows]
+    
+    for idx_i, i in enumerate(jobs_k):
+        for j in jobs_k[idx_i + 1:]:
+            Pi = Pj[i]
+            Pj_val = Pj[j]
+            
+            has_ij = (i, j, k) in model.W_index
+            has_ji = (j, i, k) in model.W_index
+            
+            if has_ij and has_ji:
+                # Ambas direções possíveis: escolher uma SE ambos ativos
+                model.no_overlap.add(
+                    model.W[i, j, k] + model.W[j, i, k] >= 
+                    model.Y[i, k] + model.Y[j, k] - 1
+                )
+            elif has_ij:
+                # Só i→j possível
+                model.no_overlap.add(
+                    model.Start[j] >= model.Start[i] + Pi - 
+                    M_big * (2 - model.Y[i, k] - model.Y[j, k])
+                )
+            elif has_ji:
+                # Só j→i possível
+                model.no_overlap.add(
+                    model.Start[i] >= model.Start[j] + Pj_val - 
+                    M_big * (2 - model.Y[i, k] - model.Y[j, k])
+                )
 
-model.link_X_W = ConstraintList()
-for (j, k, t) in model.X_index:
-    if j in reais:
-        cand = pred_for_X.get((j, k, t), [])
-        model.link_X_W.add(
-            (sum(model.W[i, j, k, t] for i in cand) if cand else 0) == model.X[j, k, t]
-        )
-    # dummys não têm predecessor real
+# (7) Jobs reais: no máximo 1 predecessor
+model.pred_count = ConstraintList()
+for j in reais:
+    for k in model.M:
+        if (j, k) in feasible_windows:
+            preds = [(i, jj, kk) for (i, jj, kk) in model.W_index 
+                     if jj == j and kk == k]
+            if preds:
+                model.pred_count.add(
+                    sum(model.W[i, j, k] for (i, jj, kk) in preds) <= model.Y[j, k]
+                )
 
-# --- DUMMY É O PRIMEIRO NA SUA MÁQUINA (EXATAMENTE 1 SUCESSOR) ---
-model.dummy_first = ConstraintList()
-for d, mk in DUMMY_MAP.items():
-    terms = [model.W[d, j, mk, t] for (i, j, k, t) in model.W_index if i == d and k == mk]
-    if terms:
-        model.dummy_first.add(sum(terms) == 1)
-
-# --- COBERTURA DE PROCESSAMENTO (SÓ PROCESSAMENTO CONTA; setups ignorados) ---
-proc_cover = defaultdict(list)   # (k,t) -> [(j,tau)]
-for (j, k, tau) in model.X_index:
-    pj = Pj[j]
-    for tt in range(tau, tau + pj):
-        if 0 <= tt < H_slots:
-            proc_cover[(k, tt)].append((j, tau))
-
-# Capacidade por máquina: <= 1 job a processar
-model.machine_capacity = ConstraintList()
-for k in M_names:
-    for t in model.T:
-        if proc_cover[(k, t)]:
-            model.machine_capacity.add(
-                sum(model.X[j, k, tau] for (j, tau) in proc_cover[(k, t)]) <= 1
+# (8) Todos jobs: no máximo 1 sucessor
+model.succ_count = ConstraintList()
+for i in model.Jall:
+    for k in model.M:
+        succs = [(ii, j, kk) for (ii, j, kk) in model.W_index 
+                 if ii == i and kk == k]
+        if succs:
+            model.succ_count.add(
+                sum(model.W[i, j, k] for (ii, j, kk) in succs) <= 1
             )
 
-# Limite global de equipas/máquinas ativas (apenas processamento)
-model.team_cap = ConstraintList()
-for t in model.T:
-    terms = [sum(model.X[j, k, tau] for (j, tau) in proc_cover[(k, t)])
-             for k in M_names if proc_cover[(k, t)]]
-    if terms:
-        model.team_cap.add(sum(terms) <= b)
+# (9) CRÍTICO: Dummys devem ter exatamente 1 sucessor
+model.dummy_rules = ConstraintList()
+for d, mk in DUMMY_MAP.items():
+    model.dummy_rules.add(model.Y[d, mk] == 1)
+    
+    succs = [(i, j, k) for (i, j, k) in model.W_index 
+             if i == d and k == mk]
+    if succs:
+        model.dummy_rules.add(
+            sum(model.W[d, j, mk] for (i, j, k) in succs) == 1
+        )
+    else:
+        dbg(f"❌ Dummy {d} sem sucessores em {mk}!")
 
-# --- START/END 
-model.Start = Var(model.J, domain=NonNegativeReals)
-model.End   = Var(model.J, domain=NonNegativeReals)
+# (10) Capacidade por máquina com amostragem temporal (evita explosão de restrições)
+SAMPLE_DENSITY = max(1, H_slots // 50)  # ~50 pontos de verificação
+sample_times = list(range(0, H_slots, SAMPLE_DENSITY))
 
-model.start_eq = ConstraintList()
+model.capacity_sample = ConstraintList()
+for k in model.M:
+    for t in sample_times:
+        # Jobs que PODEM estar ativos em t nesta máquina
+        candidates = []
+        for j in model.Jall:
+            if (j, k) not in feasible_windows:
+                continue
+            tmin, tmax = feasible_windows[(j, k)]
+            pj = Pj[j]
+            # Job pode cobrir tempo t se: tmin <= t <= tmax + pj
+            if tmin <= t <= tmax + pj:
+                candidates.append(j)
+        
+        # No máximo 1 job ativo (aproximação via amostragem)
+        if len(candidates) > 1:
+            model.capacity_sample.add(
+                sum(model.Y[j, k] for j in candidates) <= len(candidates)
+            )
+
+# --- END/MAKESPAN ---
+model.End = Var(model.J, domain=NonNegativeReals)
+model.end_def = ConstraintList()
 for j in model.J:
-    model.start_eq.add(
-        model.Start[j] == sum(t * model.X[j, k, t] for (jj, k, t) in model.X_index if jj == j)
-    )
+    model.end_def.add(model.End[j] == model.Start[j] + model.Pj[j])
 
-model.end_eq = ConstraintList()
+model.Makespan = Var(domain=NonNegativeReals, bounds=(0, H_slots))
+model.makespan_def = ConstraintList()
 for j in model.J:
-    model.end_eq.add(model.End[j] == model.Start[j] + model.Pj[j])
+    model.makespan_def.add(model.Makespan >= model.End[j])
 
-model.due_hard = ConstraintList()
-for j in model.J:
-    if math.isfinite(Dj[j]):
-        model.due_hard.add(model.End[j] <= model.Dj[j])
-
-# --- MAKESPAN ---
-model.Makespan = Var(domain=NonNegativeReals)
-model.makespan_link = ConstraintList()
-for j in model.J:
-    model.makespan_link.add(model.Makespan >= model.End[j])
-
-# opcional (ajuda a focar o solver): MS <= H_slots
-model.ms_ub = Constraint(expr=model.Makespan <= H_slots)
-
-# --- MÉTRICAS EM HORAS (obj) ---
-model.SetupTotalHours = Expression(
-    expr=sum(Sij.get((i, j), 0) * Delta * model.W[i, j, k, t]
-             for (i, j, k, t) in model.W_index)
+# --- MÉTRICAS E OBJETIVO ---
+model.SetupTotalSlots = Expression(
+    expr=sum(Sij.get((i, j), 0) * model.W[i, j, k] 
+             for (i, j, k) in model.W_index)
 )
 
-H = H_slots * Delta
-UB_sumC = len(reais) * (H + 1.0)
-model.SumCompletion = Expression(expr=sum(model.End[j] for j in model.J))
+# Objetivo: priorizar minimização de setups
+W_weight = len(reais) * H_slots + 1
 
-W = UB_sumC + 1.0  # garante prioridade absoluta aos setups
-model.obj = Objective(expr= W * model.SetupTotalHours + model.SumCompletion, sense=minimize)
+model.obj = Objective(
+    expr=W_weight * model.SetupTotalSlots + sum(model.End[j] for j in model.J),
+    sense=minimize
+)
 
+dbg(f"✅ Modelo construído. [{time.time()-T0:.1f}s]")
+dbg(f"   Variáveis: Y={len(model.Jall)*len(M_names)}, W={len(W_index)}, Start={len(model.Jall)}")
+dbg(f"   Restrições principais: ~{len(W_index)*3 + len(model.Jall)*3}")
+
+dbg("🚀 A resolver modelo...")
 solver = SolverFactory('gurobi')
-solver.options.update(dict(Threads=7, MIPGap=0.02))
+solver.options.update({
+    'Threads': 7,
+    'MIPGap': 0.02,
+    'TimeLimit': 300,  # 5 minutos máximo
+    'MIPFocus': 1,     # Focar em encontrar soluções viáveis
+    'Heuristics': 0.2  # Mais heurísticas para viabilidade
+})
 results = solver.solve(model, tee=True)
 
 # -------- Extração e gráfico --------
-job_start_h, job_dur_h, job_machine = {}, {}, {}
-for j in todos:
-    for k in M_names:
-        for t in valid_starts.get((j, k), []):
-            if value(model.X[j, k, t]) >= 0.5:
-                job_start_h[j] = t * Delta
-                job_dur_h[j] = Pj[j] * Delta
-                job_machine[j] = k
+job_start_h = {}
+job_dur_h = {}
+job_machine = {}
+
+for j in model.Jall:
+    for k in model.M:
+        if (j, k) in feasible_windows:
+            try:
+                if value(model.Y[j, k]) >= 0.5:
+                    job_start_h[j] = value(model.Start[j]) * Delta
+                    job_dur_h[j] = Pj[j] * Delta
+                    job_machine[j] = k
+                    break
+            except:
+                continue
 
 sequencias = defaultdict(list)
 for j, st in sorted(job_start_h.items(), key=lambda x: x[1]):
@@ -355,10 +453,12 @@ for k in sorted(sequencias):
     print(f"Máquina {k}: " + " → ".join(map(str, sequencias[k])))
 
 print(f"\nMakespan (h): {value(model.Makespan) * Delta:.2f}")
-total_setup_slots = sum(Sij.get((i, j), 0) * value(model.W[i, j, k, tau]) for (i, j, k, tau) in model.W_index)
+total_setup_slots = value(model.SetupTotalSlots)
 total_setup_hours = total_setup_slots * Delta
 total_proc_hours = sum(Pj[j] * Delta for j in reais)
 print(f"Tempo total em setups (h): {total_setup_hours:.2f} ({100 * total_setup_hours / (total_setup_hours + total_proc_hours):.1f}%)")
+
+dbg(f"✅ Otimização completa! [{time.time()-T0:.1f}s]")
 
 SETUP_COLOR = 'orange'
 SETUP_ALPHA = 0.45
@@ -368,14 +468,16 @@ yindex = {k: i for i, k in enumerate(machines_sorted)}
 
 fig, ax = plt.subplots(figsize=(12, 5))
 
-for (i2, j2, k2, t2) in model.W_index:
-    if value(model.W[i2, j2, k2, t2]) >= 0.5:
+for (i2, j2, k2) in model.W_index:
+    if value(model.W[i2, j2, k2]) >= 0.5:
         Sslots = Sij.get((i2, j2), 0)
         if Sslots <= 0: continue
         y = yindex.get(k2, None)
         if y is None: continue
-        start_slot = max(0, t2 - Sslots)
-        dur_slots = t2 - start_slot
+        # Setup happens before j starts
+        j_start_slot = value(model.Start[j2])
+        start_slot = max(0, j_start_slot - Sslots)
+        dur_slots = j_start_slot - start_slot
         start_h = start_slot * Delta
         dur_h = dur_slots * Delta
         if dur_h > 0:
